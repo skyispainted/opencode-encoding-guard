@@ -10,9 +10,10 @@ description: >
 **本项目文件编码原则**：所有文本文件统一为 **UTF-8 无 BOM**。这是读、写、编辑三者的基准编码。
 
 `encoding-guard.ts` 插件（`.opencode/plugins/encoding-guard.ts`）自动处理编码转换：
-- **读取**（A 类）：拦截 `read` 工具，检测 GBK（U+FFFD 密度 > 50%）后自动解码为 UTF-8 返回
-- **编辑**（B 类）：拦截 `edit` 工具，检测 GBK 后在匹配前一次性转为 UTF-8
-- 两者均对 LLM 完全透明，零闪屏
+- **读取**（A 类）：拦截 `read` 工具输出（`tool.execute.after`），检查 FF FD 密度判定 GBK，异步重读后替换输出
+- **编辑**（B 类）：拦截 `edit` 工具（`tool.execute.before`），检测 GBK 后在匹配前一次性转为 UTF-8
+- **异步 I/O + 编码缓存**（路径+mtime键控）：同一文件不重复检测，零事件循环阻塞
+- **全异步非阻塞**：`node:fs/promises`，不阻塞 UI 线程，零闪屏
 
 下列旧工具/规则已被插件替代，不再为日常路径。skill 中保留仅为 `filesystem_read_text_file` 场景和手动降级兜底。
 

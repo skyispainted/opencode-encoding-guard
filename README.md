@@ -45,23 +45,23 @@ OpenCode 默认以 UTF-8 解析所有文件，导致：
 ```
 LLM calls `read(path)`
     │
-    ├─ tool.execute.before ────────────────────────────
-    │   检测 GBK → 预读正确内容 → 存入 Map[callID]
-    ├─ read tool 执行（产生乱码）──────────────────────
+    ├─ read tool 执行 ────────────────────────────────
     ├─ tool.execute.after ─────────────────────────────
-    │   Map hit? → 替换 output.output 为正确内容
-    │
+    │   检查输出 FF FD 密度 → 异步重读 GBK → 替换输出
+    │   （异步 I/O + 编码缓存，零阻塞）
     LLM 看到正确中文 ✅
 
 LLM calls `edit(path, oldString)`
     │
     ├─ tool.execute.before ────────────────────────────
-    │   检测 GBK → GBK 解码 → 写回 UTF-8 无 BOM
+    │   异步检测 GBK 缓存 → 若 GBK 则转换写回 UTF-8 无 BOM
     ├─ edit tool 读取 UTF-8 文件 → 匹配成功 ✅
 ```
 
-- **`read`**: 临时修复，输出替换不影响磁盘文件
+- **`read`**: 后置修复（`after` hook），无预读双倍 I/O；异步非阻塞；保持原生输出格式
 - **`edit`**: 永久修复，文件转换为 UTF-8，后续不再触发
+- **编码缓存**: 同一文件（路径+mtime 不变）不重复检测，降低 I/O 开销
+- **所有 hook 使用 `node:fs/promises` 异步 API**，不阻塞 UI 事件循环
 
 ---
 
