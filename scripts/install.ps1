@@ -1,22 +1,18 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   encoding-guard 一键安装脚本
 
 .DESCRIPTION
-  从 GitHub 仓库下载 encoding-guard 插件、规则文件模板，并放置到当前项目的
-  .opencode/plugins/ 目录与项目根目录。
+  1. 全局安装 iconv-lite 到 OpenCode 依赖目录
+  2. 下载插件到全局 OpenCode 插件目录
+  3. 在当前项目放置 .encoding-rules 模板
 
 .PARAMETER Force
   覆盖已存在的本地文件。
 
 .EXAMPLE
-  # 在项目根目录执行
   irm https://raw.githubusercontent.com/skyispainted/opencode-encoding-guard/main/scripts/install.ps1 | iex
-
-.EXAMPLE
-  # 本地执行，覆盖已有文件
-  ./scripts/install.ps1 -Force
 #>
 [CmdletBinding()]
 param(
@@ -29,15 +25,14 @@ $Repo   = 'skyispainted/opencode-encoding-guard'
 $Branch = 'main'
 $RawBase = "https://raw.githubusercontent.com/$Repo/$Branch"
 
-# 需要拉取的文件: (远程相对路径, 本地相对路径, 是否为规则模板)
-$Files = @(
-  @{ Remote = 'plugin/encoding-guard.ts'; Local = '.opencode/plugins/encoding-guard.ts'; Template = $false }
-  @{ Remote = '.encoding-rules';          Local = '.encoding-rules';                       Template = $true  }
-)
+# OpenCode 全局配置目录
+$OpenCodeDir = Join-Path $env:USERPROFILE '.config\opencode'
+$PluginDir   = Join-Path $OpenCodeDir 'plugins'
+$NodeModules = Join-Path $OpenCodeDir 'node_modules'
 
 function Write-Step  ($msg) { Write-Host "[install] $msg" -ForegroundColor Cyan }
 function Write-Ok    ($msg) { Write-Host "  ✓ $msg" -ForegroundColor Green }
-function Write-Warn2 ($msg) { Write-Host "  ! $msg" -ForegroundColor Yellow }
+function Write-Warn  ($msg) { Write-Host "  ! $msg" -ForegroundColor Yellow }
 function Write-Err   ($msg) { Write-Host "  ✗ $msg" -ForegroundColor Red }
 
 function Get-RemoteFile {
@@ -52,56 +47,85 @@ function Get-RemoteFile {
   }
 }
 
-Write-Step "encoding-guard 一键安装"
-Write-Host "  项目根目录: $(Get-Location)"
-Write-Host ""
+function DownloadFile {
+  param([string]$RemotePath, [string]$LocalPath, [string]$Name)
+  $url = "$RawBase/$RemotePath"
+  $dir = Split-Path $LocalPath -Parent
 
-foreach ($f in $Files) {
-  $url      = "$RawBase/$($f.Remote)"
-  $localRel = $f.Local
-  $localAbs = Join-Path (Get-Location) $localRel
-  $dir      = Split-Path $localAbs -Parent
-
-  Write-Step "处理 $($f.Remote)"
-
-  # 已存在则跳过（除非 -Force）
-  if ((Test-Path $localAbs) -and -not $Force) {
-    if ($f.Template) {
-      Write-Warn2 "已存在 $localRel，跳过（规则文件需手动维护，避免覆盖你的配置）"
-    } else {
-      Write-Warn2 "已存在 $localRel，跳过（使用 -Force 覆盖）"
-    }
-    Write-Host ""
-    continue
+  if ((Test-Path $LocalPath) -and -not $Force) {
+    Write-Warn "已存在 $Name，跳过（使用 -Force 覆盖）"
+    return $false
   }
 
-  # 创建目录
   if ($dir -and -not (Test-Path $dir)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    Write-Ok "创建目录 $dir"
   }
 
-  # 下载
   $content = Get-RemoteFile -Url $url
-  if ($null -eq $content) {
-    Write-Host ""
-    continue
-  }
+  if ($null -eq $content) { return $false }
 
-  # 写入（UTF-8 无 BOM，保持文件原始内容）
-  [System.IO.File]::WriteAllText($localAbs, $content, (New-Object System.Text.UTF8Encoding $false))
-  Write-Ok "写入 $localRel"
-  Write-Host ""
+  [System.IO.File]::WriteAllText($LocalPath, $content, (New-Object System.Text.UTF8Encoding $false))
+  Write-Ok "写入 $Name"
+  return $true
 }
+
+Write-Step "encoding-guard 一键安装"
+Write-Host "  OpenCode 目录: $OpenCodeDir"
+Write-Host "  项目根目录:   $(Get-Location)"
+Write-Host ""
+
+# 1. 全局安装 iconv-lite
+Write-Step "安装 iconv-lite（全局）"
+if (-not (Test-Path (Join-Path $NodeModules 'iconv-lite'))) {
+  if (Test-Path (Join-Path $NodeModules 'package.json')) {
+    Push-Location $OpenCodeDir
+    & npm install iconv-lite --no-audit --no-fund 2>&1 | Out-Null
+    Pop-Location
+    if ($LASTEXITCODE -eq 0) {
+      Write-Ok "iconv-lite 安装成功"
+    } else {
+      Write-Warn "npm install 失败，请手动运行: npm i -g iconv-lite"
+    }
+  } else {
+    # 创建 package.json 并安装
+    if (-not (Test-Path $OpenCodeDir)) {
+      New-Item -ItemType Directory -Path $OpenCodeDir -Force | Out-Null
+    }
+    '{ "dependencies": { "@opencode-ai/plugin": "1.17.14" } }' | Out-File -FilePath (Join-Path $OpenCodeDir 'package.json') -Encoding utf8
+    Push-Location $OpenCodeDir
+    & npm install iconv-lite --no-audit --no-fund 2>&1 | Out-Null
+    Pop-Location
+    if ($LASTEXITCODE -eq 0) {
+      Write-Ok "iconv-lite 安装成功"
+    } else {
+      Write-Warn "npm install 失败，请手动运行: npm i -g iconv-lite"
+    }
+  }
+} else {
+  Write-Ok "iconv-lite 已存在"
+}
+Write-Host ""
+
+# 2. 下载插件到全局插件目录
+Write-Step "安装插件（全局）"
+$pluginPath = Join-Path $PluginDir 'encoding-guard.ts'
+DownloadFile -RemotePath 'plugin/encoding-guard.ts' -LocalPath $pluginPath -Name 'encoding-guard.ts'
+Write-Host ""
+
+# 3. 项目规则模板
+Write-Step "放置 .encoding-rules 模板"
+$rulesPath = Join-Path (Get-Location) '.encoding-rules'
+DownloadFile -RemotePath '.encoding-rules' -LocalPath $rulesPath -Name '.encoding-rules（模板）'
+Write-Host ""
 
 Write-Step "完成"
 Write-Host ""
 Write-Host "下一步:" -ForegroundColor White
-Write-Host "  1. 编辑 .encoding-rules，按 glob 模式配置编码，例如:" -ForegroundColor White
+Write-Host "  1. 编辑 .encoding-rules，配置编码规则，例如:" -ForegroundColor White
+Write-Host "       *.cpp gbk" -ForegroundColor Gray
 Write-Host "       *.txt gbk" -ForegroundColor Gray
-Write-Host "       src/**/*.cs gbk" -ForegroundColor Gray
 Write-Host "  2. 重启 OpenCode 使插件生效" -ForegroundColor White
 Write-Host "  3. 在 OpenCode 中用 read 读取 GBK 文件，应正常显示中文" -ForegroundColor White
 Write-Host ""
 Write-Host "  重新安装（覆盖）: ./scripts/install.ps1 -Force" -ForegroundColor Gray
-Write-Host "  卸载: 删除 .opencode/plugins/encoding-guard.ts 与 .encoding-rules" -ForegroundColor Gray
+Write-Host "  卸载: 删除 ~/.config/opencode/plugins/encoding-guard.ts 与 node_modules/iconv-lite" -ForegroundColor Gray

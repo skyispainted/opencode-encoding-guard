@@ -6,7 +6,7 @@ import iconv from "iconv-lite"
 
 const MAX_DETECT_SIZE = 1 * 1024 * 1024
 const RULES_FILE = ".encoding-rules"
-const LOG_FILE = "C:\\Users\\HuBochao\\.config\\opencode\\plugins\\encoding-guard.log"
+const LOG_FILE = (typeof import.meta.dirname === 'string' ? import.meta.dirname : '.') + "/encoding-guard.log"
 
 function log(msg: string) {
   try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`) } catch {}
