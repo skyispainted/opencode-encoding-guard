@@ -102,7 +102,8 @@ Node.js `TextDecoder` 支持的所有编码名均可使用：
 启动 → 读取 .encoding-rules → 解析规则列表
    │
    ├─ read file.txt → 匹配 *.txt gbk → GBK 解码 → 输出 UTF-8 ✅
-   ├─ edit file.txt → 匹配 *.txt gbk → 转 UTF-8 写回 → edit 匹配成功 ✅
+   ├─ edit file.cpp → 匹配 *.cpp gbk → before: GBK→UTF-8 → edit 匹配成功
+   │                                    → after: UTF-8→GBK 写回（保持原编码）✅
    └─ edit README.md → 匹配 !README.md → 默认 UTF-8 → 原样处理
 ```
 
@@ -111,10 +112,10 @@ Node.js `TextDecoder` 支持的所有编码名均可使用：
 - 按规则用对应编码重新解码
 - 替换输出，LLM 看到正确内容
 
-**`edit` 工具**（`tool.execute.before` hook）：
-- 编辑前按规则检测编码
-- 非 UTF-8 文件自动转换为 UTF-8 写回
-- 后续编辑不再触发
+**`edit` 工具**（`tool.execute.before` + `tool.execute.after` hook）：
+- **before**: 按规则检测编码，非 UTF-8 文件临时转 UTF-8，让 edit 匹配成功
+- **after**: edit 写完后，按规则编码（GBK 等）写回，**文件保持原始编码不变**
+- 编码来回转换依赖 `iconv-lite` 库（系统需安装）
 
 **编码缓存**：同一文件（路径+mtime 不变）不重复处理。
 
@@ -177,6 +178,7 @@ logs/**/*.log gbk
 | `filesystem_read_text_file` 不受覆盖 | 该工具不触发 plugin hooks | 使用 `read` 替代 |
 | 需手动配置规则 | 不再自动检测 | 按需编辑 `.encoding-rules` |
 | 大文件（>1MB）跳过 | 避免 I/O 开销 | 按 UTF-8 处理 |
+| 编码来回转换需 iconv-lite | Node.js 原生不支持写 GBK | `npm i -g iconv-lite` |
 | 仅 `read` / `edit` | 其他工具使用较少 | 通过 skill 降级 |
 
 ---
