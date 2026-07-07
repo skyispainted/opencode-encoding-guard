@@ -121,6 +121,24 @@ LLM calls `edit(path, oldString)`
 
 ---
 
+## 一键安装
+
+```powershell
+# 在你的项目根目录执行（自动从 GitHub 下载并安装）
+irm https://raw.githubusercontent.com/skyispainted/opencode-encoding-guard/main/scripts/install.ps1 | iex
+
+# 或本地执行
+./scripts/install.ps1
+
+# 覆盖已存在的文件
+./scripts/install.ps1 -Force
+
+# 卸载
+rm .opencode/plugins/encoding-guard.ts .encoding-rules
+```
+
+---
+
 ## Manual Installation
 
 1. Copy `plugin/encoding-guard.ts` → `.opencode/plugins/encoding-guard.ts`
