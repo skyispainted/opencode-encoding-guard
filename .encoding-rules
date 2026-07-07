@@ -1,0 +1,24 @@
+# .encoding-rules — 文件编码匹配规则
+# 语法类似 .gitignore，最后一行匹配的规则生效
+#
+# 每行格式: <glob-pattern> <encoding>
+# - # 开头的行是注释
+# - 空行被忽略
+# - ! 开头的规则表示排除（不再匹配上方规则）
+#
+# 支持的通配符:
+#   *      匹配除 / 外的任意字符
+#   **     匹配任意层级目录
+#   ?      匹配单个非 / 字符
+#
+# 支持的编码: utf8, gbk, gb2312, big5, shift_jis, euc-kr, windows-1251 等
+#   Node.js TextDecoder 支持的编码名均可使用
+
+# 示例规则（取消注释即可生效）:
+
+# *.txt gbk
+# *.md  utf8
+# src/**/*.cs gbk
+# logs/**/*.log gbk
+# **/*.json utf8
+# !important.txt gbk

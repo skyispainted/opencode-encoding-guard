@@ -1,59 +1,148 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { readFile, writeFile, stat } from "node:fs/promises"
 import { existsSync } from "node:fs"
+import { join } from "node:path"
 
 const MAX_DETECT_SIZE = 1 * 1024 * 1024
+const RULES_FILE = ".encoding-rules"
 
 interface CacheEntry {
-  encoding: "utf8" | "gbk"
+  encoding: string
   mtimeMs: number
 }
 
-const encodingCache = new Map<string, CacheEntry>()
+interface Rule {
+  pattern: string
+  encoding: string
+  negated: boolean
+}
 
-function detectGbk(buffer: Buffer): string | null {
-  // First-line heuristic: if the first \n-delimited line after UTF-8 decode
-  // contains U+FFFD, the file's header is not valid UTF-8 → likely GBK.
-  // This avoids dilution by long ASCII tails (e.g. 500KB log with GBK header).
-  const utf8 = new TextDecoder("utf-8", { fatal: false }).decode(buffer)
-  const nl = utf8.indexOf("\n")
-  const header = nl > 0 ? utf8.slice(0, nl) : utf8.slice(0, 200)
-  if (!header.includes("\uFFFD")) return null
+const encodingCache = new Map<string, CacheEntry>()
+let rules: Rule[] = []
+let rulesLoaded = false
+
+// --- .encoding-rules loader ---
+
+function globToRegex(pattern: string): RegExp {
+  const STAR_PLACEHOLDER = "__GLOBSTAR__"
+  let regex = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+  // ** matches any path (including /)
+  regex = regex.replace(/\*\*/g, STAR_PLACEHOLDER)
+  // * matches any char except /
+  regex = regex.replace(/\*/g, "[^/]*")
+  // ? matches single char except /
+  regex = regex.replace(/\?/g, "[^/]")
+  // restore **
+  regex = regex.replace(new RegExp(STAR_PLACEHOLDER, "g"), ".*")
+  return new RegExp(`^${regex}$`)
+}
+
+function matchRule(filePath: string): string {
+  if (!rules.length) return "utf8"
+  // Normalize path separators for matching
+  const normalized = filePath.replace(/\\/g, "/")
+  const basename = normalized.split("/").pop() || ""
+  let result = "utf8"
+
+  for (const rule of rules) {
+    if (rule.negated) {
+      const re = globToRegex(rule.pattern)
+      if (re.test(normalized) || re.test(basename)) {
+        result = "utf8" // negation resets to default
+      }
+    } else {
+      const re = globToRegex(rule.pattern)
+      if (re.test(normalized) || re.test(basename)) {
+        result = rule.encoding
+      }
+    }
+  }
+  return result
+}
+
+async function loadRules(projectRoot: string): Promise<void> {
+  const rulesPath = join(projectRoot, RULES_FILE)
+  if (!existsSync(rulesPath)) {
+    rules = []
+    rulesLoaded = true
+    return
+  }
+  const content = await readFile(rulesPath, "utf-8")
+  rules = content
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line.length > 0 && !line.startsWith("#"))
+    .map(line => {
+      const spaceIdx = line.indexOf(" ")
+      if (spaceIdx === -1) return null
+      const pattern = line.slice(0, spaceIdx)
+      const encoding = line.slice(spaceIdx + 1).trim().toLowerCase()
+      const negated = pattern.startsWith("!")
+      return { pattern: negated ? pattern.slice(1) : pattern, encoding, negated }
+    })
+    .filter(Boolean) as Rule[]
+  rulesLoaded = true
+}
+
+// --- encoding decoding ---
+
+async function decodeByRule(path: string, encoding: string): Promise<string | null> {
   try {
-    return new TextDecoder("GBK").decode(buffer)
+    const buffer = await readFile(path)
+    const upper = encoding.toUpperCase()
+    if (upper === "UTF8" || upper === "UTF-8") {
+      return new TextDecoder("utf-8", { fatal: false }).decode(buffer)
+    }
+    // Node.js TextDecoder supports: gbk, gb2312, shift_jis, euc-kr, etc.
+    return new TextDecoder(upper, { fatal: false }).decode(buffer)
   } catch {
     return null
   }
 }
 
-async function detectAndDecode(path: string): Promise<{ encoding: "utf8" | "gbk"; text?: string }> {
+async function detectAndDecode(path: string, projectRoot: string): Promise<{ encoding: string; text?: string }> {
   const s = await stat(path)
   const cached = encodingCache.get(path)
   if (cached && cached.mtimeMs === s.mtimeMs) {
-    // Cache hit: if previously detected as UTF-8, skip read entirely.
-    // If previously GBK, still need to read to get decoded text for this call.
     if (cached.encoding === "utf8") return { encoding: "utf8" }
   }
-  const buffer = await readFile(path)
-  const decoded = detectGbk(buffer)
-  if (decoded) {
-    encodingCache.set(path, { encoding: "gbk", mtimeMs: s.mtimeMs })
-    return { encoding: "gbk", text: decoded }
+
+  if (!rulesLoaded) await loadRules(projectRoot)
+  const encoding = matchRule(path)
+
+  if (encoding === "utf8") {
+    encodingCache.set(path, { encoding: "utf8", mtimeMs: s.mtimeMs })
+    return { encoding: "utf8" }
   }
-  encodingCache.set(path, { encoding: "utf8", mtimeMs: s.mtimeMs })
-  return { encoding: "utf8" }
+
+  const decoded = await decodeByRule(path, encoding)
+  if (!decoded) {
+    encodingCache.set(path, { encoding: "utf8", mtimeMs: s.mtimeMs })
+    return { encoding: "utf8" }
+  }
+  encodingCache.set(path, { encoding, mtimeMs: s.mtimeMs })
+  return { encoding, text: decoded }
 }
 
 function countFffd(text: string): number {
   let n = 0
   for (let i = 0; i < text.length; i++) {
-    if (text[i] === "\uFFFD") n++
+    if (text[i] === "�") n++
   }
   return n
 }
 
+// --- plugin ---
+
+function findProjectRoot(): string {
+  return process.cwd()
+}
+
 export const EncodingGuard: Plugin = async () => {
   encodingCache.clear()
+  rulesLoaded = false
+  const projectRoot = findProjectRoot()
+  await loadRules(projectRoot)
 
   return {
     "tool.execute.before": async (input: any, output: any) => {
@@ -63,8 +152,8 @@ export const EncodingGuard: Plugin = async () => {
       try {
         const s = await stat(path)
         if (s.size > MAX_DETECT_SIZE || s.size === 0) return
-        const result = await detectAndDecode(path)
-        if (result.encoding !== "gbk" || !result.text) return
+        const result = await detectAndDecode(path, projectRoot)
+        if (result.encoding === "utf8" || !result.text) return
         const normalized = result.text.replace(/\r\n/g, "\n")
         await writeFile(path, normalized, "utf-8")
         encodingCache.set(path, { encoding: "utf8", mtimeMs: Date.now() })
@@ -75,7 +164,7 @@ export const EncodingGuard: Plugin = async () => {
       if (input.tool !== "read") return
       if (!output.output || !input.args?.filePath) return
       const content: string = output.output
-      if (!content.includes("\uFFFD")) return
+      if (!content.includes("�")) return
       const fffdCount = countFffd(content.slice(0, 2000))
       if (fffdCount < 5) return
       const path = input.args.filePath
@@ -83,8 +172,8 @@ export const EncodingGuard: Plugin = async () => {
       try {
         const s = await stat(path)
         if (s.size > MAX_DETECT_SIZE || s.size === 0) return
-        const result = await detectAndDecode(path)
-        if (result.encoding !== "gbk" || !result.text) return
+        const result = await detectAndDecode(path, projectRoot)
+        if (result.encoding === "utf8" || !result.text) return
         const lines = result.text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")
         const numbered = lines.map((l, i) => `${i + 1}: ${l}`).join("\n")
         output.output =
