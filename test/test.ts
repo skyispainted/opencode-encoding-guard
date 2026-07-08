@@ -103,14 +103,15 @@ async function simulateRead(hooks: any, path: string) {
 }
 
 async function simulateEdit(hooks: any, path: string, newContent: string) {
-  // before hook
-  await hooks["tool.execute.before"]({ tool: "edit", args: { filePath: path } })
+  // before hook：opencode 的 args 在第二个参数里
+  const beforeOutput: any = { args: { filePath: path } }
+  await hooks["tool.execute.before"]({ tool: "edit" }, beforeOutput)
   // 模拟 opencode edit 写入（opencode 写的是 UTF-8 字符串）
   await writeFile(path, Buffer.from(newContent, "utf-8"))
-  // after hook
-  const output: any = { output: "<edit diff>" }
-  await hooks["tool.execute.after"]({ tool: "edit", args: { filePath: path } }, output)
-  return output
+  // after hook：args 在第一个参数里
+  const afterOutput: any = { output: "<edit diff>" }
+  await hooks["tool.execute.after"]({ tool: "edit", args: { filePath: path } }, afterOutput)
+  return afterOutput
 }
 
 // ============== 4. 测试用例 ==============

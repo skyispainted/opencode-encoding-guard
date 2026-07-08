@@ -194,31 +194,38 @@ export const EncodingGuard: Plugin = async (input) => {
   log(`plugin init: directory=${input.directory}`)
 
   return {
-    "tool.execute.before": async (hookInput: any) => {
-      log(`before: tool=${hookInput.tool}, sessionID=${hookInput.sessionID}, callID=${hookInput.callID}`)
+    "tool.execute.before": async (hookInput: any, hookOutput: any) => {
+      try {
+        log(`before: tool=${hookInput.tool}, sessionID=${hookInput.sessionID}, callID=${hookInput.callID}`)
 
-      if (hookInput.tool === "edit") {
-        const path = hookInput.args?.filePath
-        if (path && existsSync(path)) {
-          // 优先用缓存里的原编码；缓存没有就现查规则
-          let encoding = convertCache.get(path)
-          if (!encoding) {
-            await findRules(path)
-            encoding = matchRule(path)
-            if (encoding !== "utf8") convertCache.set(path, encoding)
-          }
-          if (encoding !== "utf8" && !utf8OnDisk.has(path)) {
-            await convertToUtf8OnDisk(path, encoding)
+        if (hookInput.tool === "edit") {
+          // opencode 的 before hook：args 在第二个参数里
+          const path = hookOutput?.args?.filePath
+          if (path && existsSync(path)) {
+            let encoding = convertCache.get(path)
+            if (!encoding) {
+              await findRules(path)
+              encoding = matchRule(path)
+              if (encoding !== "utf8") convertCache.set(path, encoding)
+            }
+            if (encoding !== "utf8" && !utf8OnDisk.has(path)) {
+              log(`before edit: converting ${path} ${encoding}->UTF-8`)
+              await convertToUtf8OnDisk(path, encoding)
+            }
+          } else {
+            log(`before edit: no path (path=${path})`)
           }
         }
+      } catch (e: any) {
+        log(`before hook CRASH: ${e.message}`)
       }
     },
 
     "tool.execute.after": async (hookInput: any, output: any) => {
-      if (hookInput.tool === "read") {
-        const path = hookInput.args?.filePath
-        if (!path || !existsSync(path)) return
-        try {
+      try {
+        if (hookInput.tool === "read") {
+          const path = hookInput.args?.filePath
+          if (!path || !existsSync(path)) return
           await findRules(path)
           const encoding = matchRule(path)
           const buffer = await readFile(path)
@@ -231,26 +238,26 @@ export const EncodingGuard: Plugin = async (input) => {
 
           if (encoding !== "utf8") {
             convertCache.set(path, encoding)
+            log(`after read: cached ${path}=${encoding}, cacheSize=${convertCache.size}`)
           }
           return
-        } catch (e: any) {
-          output.output = `[EG:ERROR ${e.message}]`
-          return
         }
-      }
 
-      if (hookInput.tool === "edit") {
-        const path = hookInput.args?.filePath
-        log(`after edit: path=${path}`)
-        if (!path || !existsSync(path)) return
-        if (!convertCache.has(path)) {
-          log(`after edit: not in cache, skipping`)
-          return
+        if (hookInput.tool === "edit") {
+          const path = hookInput.args?.filePath
+          log(`after edit: path=${path}`)
+          if (!path || !existsSync(path)) return
+          if (!convertCache.has(path)) {
+            log(`after edit: not in cache, skipping`)
+            return
+          }
+          const origEncoding = convertCache.get(path)!
+          await convertBack(path, origEncoding)
+          const prev = typeof output?.output === "string" ? output.output : ""
+          output.output = prev ? `${prev}\n\n[EG:edit] wrote ${path} as ${origEncoding}` : `[EG:edit] wrote ${path} as ${origEncoding}`
         }
-        const origEncoding = convertCache.get(path)!
-        await convertBack(path, origEncoding)
-        const prev = typeof output?.output === "string" ? output.output : ""
-        output.output = prev ? `${prev}\n\n[EG:edit] wrote ${path} as ${origEncoding}` : `[EG:edit] wrote ${path} as ${origEncoding}`
+      } catch (e: any) {
+        log(`after hook CRASH: ${e.message}`)
       }
     },
   }
