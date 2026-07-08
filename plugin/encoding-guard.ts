@@ -1,12 +1,15 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { readFile, stat } from "node:fs/promises"
-import { existsSync, writeFileSync, appendFileSync } from "node:fs"
+import { existsSync, writeFileSync, appendFileSync, copyFileSync, unlinkSync, readFileSync } from "node:fs"
 import { join, dirname } from "node:path"
 import iconv from "iconv-lite"
 
 const MAX_DETECT_SIZE = 1 * 1024 * 1024
 const RULES_FILE = ".encoding-rules"
-const LOG_FILE = (typeof import.meta.dirname === 'string' ? import.meta.dirname : '.') + "/encoding-guard.log"
+const BASE_DIR = typeof import.meta.dirname === 'string' ? import.meta.dirname : '.'
+const LOG_FILE = BASE_DIR + "/encoding-guard.log"
+const INFLIGHT_FILE = BASE_DIR + "/encoding-guard.inflight"
+const BACKUP_SUFFIX = ".eg-backup"
 
 function log(msg: string) {
   try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${msg}\n`) } catch {}
@@ -14,6 +17,60 @@ function log(msg: string) {
 
 const convertCache = new Map<string, string>()
 const utf8OnDisk = new Set<string>()
+
+// 记录当前"磁盘是 UTF-8、原文件在 .eg-backup"的路径集合
+// 写到磁盘上，用于崩溃后重启时自动恢复
+function addInflight(path: string) {
+  try {
+    let lines: string[] = []
+    if (existsSync(INFLIGHT_FILE)) {
+      lines = readFileSync(INFLIGHT_FILE, "utf-8").split("\n").filter(Boolean)
+    }
+    if (!lines.includes(path)) {
+      lines.push(path)
+      writeFileSync(INFLIGHT_FILE, lines.join("\n") + "\n")
+    }
+  } catch {}
+}
+
+function removeInflight(path: string) {
+  try {
+    if (!existsSync(INFLIGHT_FILE)) return
+    const lines = readFileSync(INFLIGHT_FILE, "utf-8").split("\n").filter(Boolean)
+    const next = lines.filter(p => p !== path)
+    if (next.length === 0) {
+      unlinkSync(INFLIGHT_FILE)
+    } else {
+      writeFileSync(INFLIGHT_FILE, next.join("\n") + "\n")
+    }
+  } catch {}
+}
+
+// 启动时扫描 inflight 文件，把上次崩溃残留的 UTF-8 磁盘文件恢复成原编码备份
+async function recoverFromCrash() {
+  if (!existsSync(INFLIGHT_FILE)) return
+  try {
+    const lines = readFileSync(INFLIGHT_FILE, "utf-8").split("\n").filter(Boolean)
+    if (!lines.length) return
+    for (const path of lines) {
+      const backupPath = path + BACKUP_SUFFIX
+      if (existsSync(backupPath)) {
+        try {
+          copyFileSync(backupPath, path)
+          unlinkSync(backupPath)
+          log(`recovered ${path} from backup on startup`)
+        } catch (e: any) {
+          log(`recover FAILED for ${path}: ${e.message}`)
+        }
+      } else {
+        log(`no backup found for inflight ${path}, skipping`)
+      }
+    }
+    unlinkSync(INFLIGHT_FILE)
+  } catch (e: any) {
+    log(`recoverFromCrash ERROR: ${e.message}`)
+  }
+}
 
 interface Rule {
   pattern: string
@@ -75,23 +132,21 @@ async function findRules(filePath: string): Promise<void> {
   }
 }
 
-function decodeBuffer(buffer: Buffer, encoding: string): string {
-  if (encoding === "utf8") return new TextDecoder("utf-8", { fatal: false }).decode(buffer)
-  const upper = encoding.toUpperCase().replace("-", "")
-  return new TextDecoder(upper, { fatal: false }).decode(buffer)
-}
-
 async function convertToUtf8OnDisk(path: string, encoding: string): Promise<boolean> {
   if (encoding === "utf8") return false
   try {
     const s = await stat(path)
     if (s.size > MAX_DETECT_SIZE) return false
+    // 备份原文件，用于崩溃恢复
+    const backupPath = path + BACKUP_SUFFIX
+    copyFileSync(path, backupPath)
     const buffer = await readFile(path)
-    const text = decodeBuffer(buffer, encoding)
+    const text = iconv.decode(buffer, encoding)
     writeFileSync(path, Buffer.from(text, "utf-8"))
     utf8OnDisk.add(path)
     convertCache.set(path, encoding)
-    log(`converted ${path} ${encoding}->UTF-8 on disk`)
+    addInflight(path)
+    log(`converted ${path} ${encoding}->UTF-8 on disk (backup: ${backupPath})`)
     return true
   } catch (e: any) {
     log(`convertToUtf8 ERROR: ${e.message}`)
@@ -100,6 +155,7 @@ async function convertToUtf8OnDisk(path: string, encoding: string): Promise<bool
 }
 
 async function convertBack(path: string, encoding: string): Promise<boolean> {
+  const backupPath = path + BACKUP_SUFFIX
   try {
     const buffer = await readFile(path)
     const text = buffer.toString("utf-8")
@@ -107,15 +163,32 @@ async function convertBack(path: string, encoding: string): Promise<boolean> {
     writeFileSync(path, encoded)
     utf8OnDisk.delete(path)
     convertCache.delete(path)
-    log(`converted ${path} UTF-8->${encoding} on disk`)
+    // 转换成功，清理备份
+    try { unlinkSync(backupPath) } catch {}
+    removeInflight(path)
+    log(`converted ${path} UTF-8->${encoding} on disk (backup removed)`)
     return true
   } catch (e: any) {
-    log(`convertBack ERROR: ${e.message}`)
+    log(`convertBack ERROR: ${e.message}, attempting restore from backup`)
+    // 转换失败，用备份恢复原文件
+    if (existsSync(backupPath)) {
+      try {
+        copyFileSync(backupPath, path)
+        unlinkSync(backupPath)
+        utf8OnDisk.delete(path)
+        convertCache.delete(path)
+        removeInflight(path)
+        log(`restored ${path} from backup`)
+      } catch (restoreErr: any) {
+        log(`restore FAILED: ${restoreErr.message}`)
+      }
+    }
     return false
   }
 }
 
 log("=== PLUGIN LOADED ===")
+recoverFromCrash()
 
 export const EncodingGuard: Plugin = async (input) => {
   log(`plugin init: directory=${input.directory}`)
@@ -141,13 +214,15 @@ export const EncodingGuard: Plugin = async (input) => {
           await findRules(path)
           const encoding = matchRule(path)
           const buffer = await readFile(path)
-          const text = decodeBuffer(buffer, encoding)
+          const text = encoding === "utf8"
+            ? buffer.toString("utf-8")
+            : iconv.decode(buffer, encoding)
           const lines = text.replace(/\r\n/g, "\n").split("\n")
           const numbered = lines.map((l, i) => `${i + 1}: ${l}`).join("\n")
           output.output = `[EG:${encoding}] <path>${path}</path>\n<type>file</type>\n<content>\n${numbered}\n\n(End of file - total ${lines.length} lines)\n</content>`
 
           if (encoding !== "utf8") {
-            await convertToUtf8OnDisk(path, encoding)
+            convertCache.set(path, encoding)
           }
           return
         } catch (e: any) {
@@ -166,7 +241,8 @@ export const EncodingGuard: Plugin = async (input) => {
         }
         const origEncoding = convertCache.get(path)!
         await convertBack(path, origEncoding)
-        output.output = `[EG:edit] wrote ${path} as ${origEncoding}`
+        const prev = typeof output?.output === "string" ? output.output : ""
+        output.output = prev ? `${prev}\n\n[EG:edit] wrote ${path} as ${origEncoding}` : `[EG:edit] wrote ${path} as ${origEncoding}`
       }
     },
   }

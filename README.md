@@ -81,17 +81,17 @@ src/**/*.ps1 gbk
 
 ### 支持的编码
 
-Node.js `TextDecoder` 支持的所有编码名均可使用：
+由 `iconv-lite` 提供，覆盖所有常见代码页：
 
 | 编码名 | 说明 |
 |--------|------|
-| `gbk` | 简体中文 (CP936) |
-| `gb2312` | GB2312 |
+| `gbk` / `gb2312` / `gb18030` | 简体中文 |
 | `big5` | 繁体中文 |
-| `shift_jis` | 日文 |
-| `euc-kr` | 韩文 |
-| `windows-1251` | 俄文 (CP1251) |
-| `iso-8859-1` | 西欧 |
+| `shift_jis` / `euc-jp` | 日文 |
+| `euc-kr` / `johab` | 韩文 |
+| `windows-1250` ~ `windows-1258` | 各语言代码页 |
+| `iso-8859-1` ~ `iso-8859-15` | 西欧 / 北欧 / 南欧等 |
+| `koi8-r` / `koi8-u` | 俄文 |
 | `utf8` | UTF-8 |
 
 ---
@@ -108,16 +108,17 @@ Node.js `TextDecoder` 支持的所有编码名均可使用：
 ```
 
 **`read` 工具**（`tool.execute.after` hook）：
-- 读取后检测到乱码（U+FFFD 密度高）
-- 按规则用对应编码重新解码
-- 替换输出，LLM 看到正确内容
+- 按 `.encoding-rules` 命中编码，用 `iconv-lite` 解码成 UTF-8
+- 替换 `output.output`，LLM 看到正确内容
+- **磁盘文件保持原编码不动**，只把编码记录到内存 cache 供后续 edit 使用
 
 **`edit` 工具**（`tool.execute.before` + `tool.execute.after` hook）：
-- **before**: 按规则检测编码，非 UTF-8 文件临时转 UTF-8，让 edit 匹配成功
-- **after**: edit 写完后，按规则编码（GBK 等）写回，**文件保持原始编码不变**
-- 编码来回转换依赖 `iconv-lite` 库（系统需安装）
+- **before**: 从 cache 取出原编码，备份原文件到 `*.eg-backup`，临时把磁盘转 UTF-8（让 opencode 内置 edit 能 diff）
+- **after**: edit 写完后，用 `iconv-lite` 把内容从 UTF-8 编回原编码写回磁盘，**文件保持原始编码不变**；删除备份
+- 进程崩溃时，下次启动会自动扫描 `encoding-guard.inflight`，把残留的 UTF-8 磁盘文件用备份还原
+- 编码来回转换依赖 `iconv-lite` 库（随插件一起安装）
 
-**编码缓存**：同一文件（路径+mtime 不变）不重复处理。
+**编码缓存**：以路径为 key 记录原编码（`convertCache`）；`utf8OnDisk` 标记当前磁盘是否为 UTF-8，避免重复转换。
 
 ---
 
@@ -178,7 +179,7 @@ logs/**/*.log gbk
 | `filesystem_read_text_file` 不受覆盖 | 该工具不触发 plugin hooks | 使用 `read` 替代 |
 | 需手动配置规则 | 不再自动检测 | 按需编辑 `.encoding-rules` |
 | 大文件（>1MB）跳过 | 避免 I/O 开销 | 按 UTF-8 处理 |
-| 编码来回转换需 iconv-lite | Node.js 原生不支持写 GBK | `npm i -g iconv-lite` |
+| 编码来回转换需 iconv-lite | Node.js 原生不支持写 GBK | 安装脚本会自动装到 `~/.config/opencode/node_modules/` |
 | 仅 `read` / `edit` | 其他工具使用较少 | 通过 skill 降级 |
 
 ---
