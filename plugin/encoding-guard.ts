@@ -198,8 +198,16 @@ export const EncodingGuard: Plugin = async (input) => {
       log(`before: tool=${hookInput.tool}, sessionID=${hookInput.sessionID}, callID=${hookInput.callID}`)
 
       if (hookInput.tool === "edit") {
-        for (const [path, encoding] of new Map(convertCache)) {
-          if (!utf8OnDisk.has(path) && existsSync(path)) {
+        const path = hookInput.args?.filePath
+        if (path && existsSync(path)) {
+          // 优先用缓存里的原编码；缓存没有就现查规则
+          let encoding = convertCache.get(path)
+          if (!encoding) {
+            await findRules(path)
+            encoding = matchRule(path)
+            if (encoding !== "utf8") convertCache.set(path, encoding)
+          }
+          if (encoding !== "utf8" && !utf8OnDisk.has(path)) {
             await convertToUtf8OnDisk(path, encoding)
           }
         }
