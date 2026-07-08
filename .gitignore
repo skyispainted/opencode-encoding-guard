@@ -1,2 +1,8 @@
 .opencode/
 lib/
+node_modules/
+plugin/encoding-guard.log
+plugin/encoding-guard.inflight
+test/fixtures/*.cpp
+test/fixtures/*.eg-backup
+test/fixtures/.encoding-rules

@@ -1,0 +1,3 @@
+# .encoding-rules — 测试用
+*.cpp gbk
+*.h   gbk
