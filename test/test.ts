@@ -76,7 +76,7 @@ function assert(condition: boolean, msg: string) {
 async function assertIsGBK(path: string, label: string) {
   const bytes = await readFile(path)
   const asGbk = iconv.decode(bytes, "gbk")
-  const hasExpected = /中文|你好|测试|文件|编码|世界|修改|直接/.test(asGbk)
+  const hasExpected = /中文|你好|测试|文件|编码|世界|修改|直接|编辑|初始|一次|二次|BOM|空格/.test(asGbk)
   // 去掉可能的 BOM 再比较
   const stripped = bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF
     ? bytes.subarray(3)
@@ -318,6 +318,98 @@ async function test8_GrepKeepsEncoding(hooks: any) {
   assert(result.output.includes("文件"), "grep 输出包含正确中文")
 }
 
+async function test8_MoreEdgeCases(hooks: any) {
+  console.log("\n[test 8] 边界情况测试")
+
+  // 8.1 UTF-8 文件不应该被转换
+  console.log("  8.1 UTF-8 文件保持不变")
+  const utf8File = join(FIXTURES, "utf8.cpp")
+  const utf8Content = "// UTF-8 文件\nint main() { return 0; }\n"
+  await writeFile(utf8File, utf8Content, "utf-8")
+  await simulateRead(hooks, utf8File)
+  const utf8AfterRead = await readFile(utf8File, "utf-8")
+  assert(utf8AfterRead === utf8Content, "UTF-8 文件 read 后不变")
+  await unlink(utf8File)
+
+  // 8.2 空文件
+  console.log("  8.2 空文件处理")
+  const emptyFile = join(FIXTURES, "empty.cpp")
+  await writeFile(emptyFile, "", "utf-8")
+  await simulateRead(hooks, emptyFile)
+  const emptyAfter = await readFile(emptyFile, "utf-8")
+  assert(emptyAfter === "", "空文件 read 后仍为空")
+  await unlink(emptyFile)
+
+  // 8.3 大文件（>1MB）应该跳过转换
+  console.log("  8.3 大文件跳过转换")
+  const largeFile = join(FIXTURES, "large.cpp")
+  const largeContent = "// 大文件\n" + "x".repeat(1024 * 1024 + 100) // >1MB
+  await writeFile(largeFile, iconv.encode(largeContent, "gbk"))
+  const largeBefore = await readFile(largeFile)
+  await simulateRead(hooks, largeFile)
+  const largeAfter = await readFile(largeFile)
+  assert(Buffer.compare(largeBefore, largeAfter) === 0, "大文件 read 后字节不变（跳过转换）")
+  await unlink(largeFile)
+
+  // 8.4 混合行尾（CRLF 和 LF 混用）
+  console.log("  8.4 混合行尾保持原样")
+  const mixedFile = join(FIXTURES, "mixed.cpp")
+  const mixedContent = "// 第一行\r\n// 第二行\n// 第三行\r\n"
+  await writeFile(mixedFile, iconv.encode(mixedContent, "gbk"))
+  await simulateEdit(hooks, mixedFile, "// 修改后\r\n// 第二行\n// 第三行\r\n")
+  const mixedAfter = iconv.decode(await readFile(mixedFile), "gbk")
+  assert(mixedAfter.includes("\r\n") && mixedAfter.includes("\n"), "混合行尾被保留")
+  await unlink(mixedFile)
+
+  // 8.5 只有 ASCII 的 GBK 文件
+  console.log("  8.5 纯 ASCII 的 GBK 文件")
+  const asciiFile = join(FIXTURES, "ascii.cpp")
+  const asciiContent = "// ASCII only\nint main() { return 0; }\n"
+  await writeFile(asciiFile, iconv.encode(asciiContent, "gbk"))
+  await simulateRead(hooks, asciiFile)
+  const asciiAfter = iconv.decode(await readFile(asciiFile), "gbk")
+  assert(asciiAfter === asciiContent, "纯 ASCII 内容保持不变")
+  await unlink(asciiFile)
+
+  // 8.6 多次操作同一文件
+  console.log("  8.6 多次操作同一文件")
+  const multiFile = join(FIXTURES, "multi.cpp")
+  await writeFile(multiFile, iconv.encode("// 初始内容\n", "gbk"))
+  await simulateRead(hooks, multiFile)
+  await simulateEdit(hooks, multiFile, "// 第一次编辑\n")
+  await simulateRead(hooks, multiFile)
+  await simulateEdit(hooks, multiFile, "// 第二次编辑\n")
+  const multiAfter = iconv.decode(await readFile(multiFile), "gbk")
+  assert(multiAfter.includes("第二次编辑"), "多次编辑后内容正确")
+  await assertIsGBK(multiFile, "多次操作后仍是 GBK")
+  await unlink(multiFile)
+
+  // 8.7 特殊字符路径（空格）
+  console.log("  8.7 路径包含空格")
+  const spaceFile = join(FIXTURES, "file with spaces.cpp")
+  await writeFile(spaceFile, iconv.encode("// 空格路径\n", "gbk"))
+  await simulateRead(hooks, spaceFile)
+  const spaceAfter = iconv.decode(await readFile(spaceFile), "gbk")
+  assert(spaceAfter.includes("空格路径"), "空格路径文件正常处理")
+  await unlink(spaceFile)
+
+  // 8.8 BOM 处理
+  console.log("  8.8 带 BOM 的文件")
+  const bomFile = join(FIXTURES, "bom.cpp")
+  const bomContent = "// BOM 测试\n"
+  const bomBuffer = Buffer.concat([
+    Buffer.from([0xEF, 0xBB, 0xBF]), // UTF-8 BOM
+    Buffer.from(bomContent, "utf-8")
+  ])
+  await writeFile(bomFile, bomBuffer)
+  await simulateRead(hooks, bomFile)
+  const bomAfter = await readFile(bomFile, "utf-8")
+  assert(bomAfter.includes("BOM 测试"), "BOM 文件能正常读取")
+  await unlink(bomFile)
+
+  assert(true, "所有边界情况测试通过")
+}
+
 // ============== 5. 主流程 ==============
 
 async function main() {
@@ -341,6 +433,7 @@ async function main() {
     await test6_ApplyPatchKeepsEncoding(hooks)
     await test7_CRLFLineEndings(hooks)
     await test8_GrepKeepsEncoding(hooks)
+    await test8_MoreEdgeCases(hooks)
   } finally {
     await teardown()
   }
