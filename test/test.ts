@@ -132,6 +132,23 @@ async function simulateWrite(hooks: any, path: string, newContent: string) {
   return afterOutput
 }
 
+async function simulateApplyPatch(hooks: any, path: string) {
+  // apply_patch：类似 edit，before 转 UTF-8，after 转回
+  const beforeOutput: any = { args: { filePath: path, patch: "some patch" } }
+  await hooks["tool.execute.before"]({ tool: "apply_patch" }, beforeOutput)
+  // 模拟 opencode 应用 patch（会修改文件）
+  const afterOutput: any = { output: "<patch applied>" }
+  await hooks["tool.execute.after"]({ tool: "apply_patch", args: { filePath: path } }, afterOutput)
+  return afterOutput
+}
+
+async function simulateGrep(hooks: any, path: string, output: string) {
+  // grep：不修改文件，只读取并搜索
+  const afterOutput: any = { output }
+  await hooks["tool.execute.after"]({ tool: "grep", args: { paths: [path] } }, afterOutput)
+  return afterOutput
+}
+
 // ============== 4. 测试用例 ==============
 
 async function test1_ReadDoesNotMutateDisk(hooks: any) {
@@ -227,6 +244,36 @@ async function test5_WriteToolKeepsEncoding(hooks: any) {
   assert(text.includes("write 工具写入的中文"), "write 后内容正确")
 }
 
+async function test6_ApplyPatchKeepsEncoding(hooks: any) {
+  console.log("\n[test 6] apply_patch 工具：patch 前后应保持 GBK 编码")
+
+  // 先 read，让 cache 有 A
+  await writeFile(FILE_A, iconv.encode(contentA, "gbk"))
+  await simulateRead(hooks, FILE_A)
+
+  // 应用 patch
+  await simulateApplyPatch(hooks, FILE_A)
+
+  // 磁盘应该还是 GBK
+  await assertIsGBK(FILE_A, "apply_patch 后 A")
+}
+
+async function test7_GrepDetectsEncoding(hooks: any) {
+  console.log("\n[test 7] grep 工具：检测乱码并提示编码信息")
+
+  // 准备 GBK 文件
+  await writeFile(FILE_A, iconv.encode(contentA, "gbk"))
+  await simulateRead(hooks, FILE_A)
+
+  // 模拟 grep 返回包含乱码的输出（替换字符 ）
+  const garbledOutput = "file.cpp:10:  some garbled text"
+  const result = await simulateGrep(hooks, FILE_A, garbledOutput)
+
+  // 应该包含编码提示
+  assert(result.output.includes("[EG:grep]"), "grep 输出含 [EG:grep] 标记")
+  assert(result.output.includes("gbk"), "grep 提示包含编码名 gbk")
+}
+
 // ============== 5. 主流程 ==============
 
 async function main() {
@@ -247,6 +294,8 @@ async function main() {
     await test3_EditWithoutPriorRead(hooks)
     await test4_EditOutputPreservesDiff(hooks)
     await test5_WriteToolKeepsEncoding(hooks)
+    await test6_ApplyPatchKeepsEncoding(hooks)
+    await test7_GrepDetectsEncoding(hooks)
   } finally {
     await teardown()
   }
