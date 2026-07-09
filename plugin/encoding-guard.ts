@@ -198,13 +198,6 @@ export const EncodingGuard: Plugin = async (input) => {
       try {
         log(`before: tool=${hookInput.tool}, sessionID=${hookInput.sessionID}, callID=${hookInput.callID}`)
 
-        // 诊断：dump 所有工具的 args 结构
-        const args = hookOutput?.args ?? hookInput?.args
-        if (args && (hookInput.tool === "write" || hookInput.tool === "edit" || hookInput.tool === "read")) {
-          const argKeys = Object.keys(args)
-          log(`before ${hookInput.tool}: argKeys=${JSON.stringify(argKeys)}`)
-        }
-
         if (hookInput.tool === "edit") {
           // opencode 的 before hook：args 在第二个参数里
           const path = hookOutput?.args?.filePath
@@ -243,6 +236,23 @@ export const EncodingGuard: Plugin = async (input) => {
               // 先尝试直接替换为 Buffer，看 opencode 是否接受
               hookOutput.args.content = gbkBuffer
               log(`before write: replaced content with ${gbkBuffer.length} bytes of ${encoding}`)
+            }
+          }
+        }
+
+        // apply_patch 工具：类似 edit，需要先把文件转 UTF-8
+        if (hookInput.tool === "apply_patch") {
+          const path = hookOutput?.args?.filePath ?? hookOutput?.args?.path
+          if (path && existsSync(path)) {
+            let encoding = convertCache.get(path)
+            if (!encoding) {
+              await findRules(path)
+              encoding = matchRule(path)
+              if (encoding !== "utf8") convertCache.set(path, encoding)
+            }
+            if (encoding !== "utf8" && !utf8OnDisk.has(path)) {
+              log(`before apply_patch: converting ${path} ${encoding}->UTF-8`)
+              await convertToUtf8OnDisk(path, encoding)
             }
           }
         }
@@ -286,6 +296,21 @@ export const EncodingGuard: Plugin = async (input) => {
           const prev = typeof output?.output === "string" ? output.output : ""
           output.output = prev ? `${prev}\n\n[EG:edit] wrote ${path} as ${origEncoding}` : `[EG:edit] wrote ${path} as ${origEncoding}`
         }
+
+        // apply_patch 工具：类似 edit，patch 后需要转回原编码
+        if (hookInput.tool === "apply_patch") {
+          const path = hookInput.args?.filePath ?? hookInput.args?.path
+          log(`after apply_patch: path=${path}`)
+          if (!path || !existsSync(path)) return
+          if (!convertCache.has(path)) {
+            log(`after apply_patch: not in cache, skipping`)
+            return
+          }
+          const origEncoding = convertCache.get(path)!
+          await convertBack(path, origEncoding)
+          const prev = typeof output?.output === "string" ? output.output : ""
+          output.output = prev ? `${prev}\n\n[EG:apply_patch] wrote ${path} as ${origEncoding}` : `[EG:apply_patch] wrote ${path} as ${origEncoding}`
+        }
         if (hookInput.tool === "write") {
           // write 工具直接写整个文件。如果文件应该是 GBK 等非 UTF-8 编码：
           // 1) before 已尝试拦截 content；如果拦截成功，磁盘已是 GBK
@@ -307,6 +332,31 @@ export const EncodingGuard: Plugin = async (input) => {
               } catch {
                 // 不是合法 UTF-8 —— 说明 before 已经转过了，或者本来就是原编码
                 log(`after write: ${path} not UTF-8, leaving as-is`)
+              }
+            }
+          }
+        }
+
+        // grep 工具：读取文件内容搜索，输出需要转码
+        if (hookInput.tool === "grep") {
+          // grep 的 output.output 是字符串，包含搜索结果
+          // 需要检测是否有乱码（GBK 文件被当 UTF-8 读取）
+          if (typeof output?.output === "string" && output.output.includes("")) {
+            // 有替换字符，说明是编码问题
+            // 尝试从 cache 或规则中获取编码
+            const paths = hookInput.args?.paths || hookInput.args?.path
+            if (paths) {
+              const pathList = Array.isArray(paths) ? paths : [paths]
+              // 找第一个在 cache 里的文件
+              for (const p of pathList) {
+                const encoding = convertCache.get(p)
+                if (encoding && encoding !== "utf8") {
+                  // 重新执行搜索并转码
+                  // 这里简化处理：标记一下，让 LLM 知道有编码问题
+                  output.output = `[EG:grep] 结果可能包含乱码，文件编码为 ${encoding}。建议先用 read 工具读取文件确认内容。\n\n${output.output}`
+                  log(`after grep: detected encoding issue for ${p}, encoding=${encoding}`)
+                  break
+                }
               }
             }
           }
