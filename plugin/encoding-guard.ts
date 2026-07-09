@@ -142,7 +142,9 @@ async function convertToUtf8OnDisk(path: string, encoding: string): Promise<bool
     copyFileSync(path, backupPath)
     const buffer = await readFile(path)
     const text = iconv.decode(buffer, encoding)
-    writeFileSync(path, Buffer.from(text, "utf-8"))
+    // 统一行尾为 LF（patch/edit 通常使用 LF）
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    writeFileSync(path, Buffer.from(normalized, "utf-8"))
     utf8OnDisk.add(path)
     convertCache.set(path, encoding)
     addInflight(path)
@@ -157,9 +159,23 @@ async function convertToUtf8OnDisk(path: string, encoding: string): Promise<bool
 async function convertBack(path: string, encoding: string): Promise<boolean> {
   const backupPath = path + BACKUP_SUFFIX
   try {
+    // 读取备份以确定原始行尾风格
+    let originalLineEnding = "\n"
+    if (existsSync(backupPath)) {
+      const backupBuffer = readFileSync(backupPath)
+      const backupText = iconv.decode(backupBuffer, encoding)
+      if (backupText.includes("\r\n")) {
+        originalLineEnding = "\r\n"
+      }
+    }
+
     const buffer = await readFile(path)
     const text = buffer.toString("utf-8")
-    const encoded = iconv.encode(text, encoding)
+    // 恢复原始行尾风格
+    const restored = originalLineEnding === "\r\n"
+      ? text.replace(/\n/g, "\r\n")
+      : text
+    const encoded = iconv.encode(restored, encoding)
     writeFileSync(path, encoded)
     utf8OnDisk.delete(path)
     convertCache.delete(path)
@@ -251,30 +267,18 @@ export const EncodingGuard: Plugin = async (input) => {
               if (encoding !== "utf8") convertCache.set(path, encoding)
             }
             if (encoding !== "utf8" && !utf8OnDisk.has(path)) {
-              log(`before apply_patch: converting ${path} ${encoding}->UTF-8`)
-              await convertToUtf8OnDisk(path, encoding)
-            }
-          }
-        }
-
-        // grep 工具：和 edit 一样，before 转 UTF-8 让 grep 搜到正确内容
-        if (hookInput.tool === "grep") {
-          const paths = hookOutput?.args?.paths || hookOutput?.args?.path
-          if (paths) {
-            const pathList = Array.isArray(paths) ? paths : [paths]
-            for (const p of pathList) {
-              if (existsSync(p)) {
-                let encoding = convertCache.get(p)
-                if (!encoding) {
-                  await findRules(p)
-                  encoding = matchRule(p)
-                  if (encoding !== "utf8") convertCache.set(p, encoding)
-                }
-                if (encoding !== "utf8" && !utf8OnDisk.has(p)) {
-                  log(`before grep: converting ${p} ${encoding}->UTF-8`)
-                  await convertToUtf8OnDisk(p, encoding)
-                }
-              }
+              log(`before apply_patch: converting ${path} ${encoding}->UTF-8 (normalizing line endings to LF)`)
+              // 读取原文件并解码
+              const buffer = readFileSync(path)
+              const text = iconv.decode(buffer, encoding)
+              // 统一行尾为 LF（patch 通常使用 LF）
+              const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+              // 备份并写入 UTF-8
+              const backupPath = path + ".eg-backup"
+              copyFileSync(path, backupPath)
+              writeFileSync(path, Buffer.from(normalized, "utf-8"))
+              utf8OnDisk.add(path)
+              addInflight(path)
             }
           }
         }
@@ -334,19 +338,42 @@ export const EncodingGuard: Plugin = async (input) => {
           output.output = prev ? `${prev}\n\n[EG:apply_patch] wrote ${path} as ${origEncoding}` : `[EG:apply_patch] wrote ${path} as ${origEncoding}`
         }
 
-        // grep 工具：和 edit 一样，after 转回原编码
+        // grep 工具：和 read 一致，只处理输出，不动磁盘
         if (hookInput.tool === "grep") {
+          const pattern = hookInput.args?.pattern
           const paths = hookInput.args?.paths || hookInput.args?.path
-          if (paths) {
-            const pathList = Array.isArray(paths) ? paths : [paths]
-            for (const p of pathList) {
-              if (existsSync(p) && convertCache.has(p)) {
-                const origEncoding = convertCache.get(p)!
-                await convertBack(p, origEncoding)
-                log(`after grep: converted ${p} back to ${origEncoding}`)
+          if (!pattern || !paths) return
+
+          const pathList = Array.isArray(paths) ? paths : [paths]
+          const resultLines: string[] = []
+          const regex = new RegExp(pattern)
+
+          for (const filePath of pathList) {
+            if (!existsSync(filePath)) continue
+
+            await findRules(filePath)
+            const encoding = matchRule(filePath)
+
+            try {
+              // 用正确编码读取文件
+              const buffer = readFileSync(filePath)
+              const text = encoding === "utf8"
+                ? buffer.toString("utf-8")
+                : iconv.decode(buffer, encoding)
+
+              const lines = text.split(/\r?\n/)
+              for (let i = 0; i < lines.length; i++) {
+                if (regex.test(lines[i])) {
+                  resultLines.push(`${filePath}:${i + 1}:${lines[i]}`)
+                }
               }
+            } catch (e: any) {
+              log(`grep error for ${filePath}: ${e.message}`)
             }
           }
+
+          output.output = resultLines.join("\n")
+          log(`after grep: re-implemented grep for ${pathList.length} files with correct encoding`)
         }
 
         if (hookInput.tool === "write") {

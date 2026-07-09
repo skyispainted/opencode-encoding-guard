@@ -142,13 +142,27 @@ async function simulateApplyPatch(hooks: any, path: string) {
   return afterOutput
 }
 
-async function simulateGrep(hooks: any, path: string, output: string) {
-  // grep：和 edit 一样，before 转 UTF-8，after 转回
-  const beforeOutput: any = { args: { paths: [path] } }
-  await hooks["tool.execute.before"]({ tool: "grep" }, beforeOutput)
-  // 模拟 opencode grep（读取并搜索）
-  const afterOutput: any = { output }
-  await hooks["tool.execute.after"]({ tool: "grep", args: { paths: [path] } }, afterOutput)
+async function simulateGrep(hooks: any, path: string, pattern: string) {
+  // grep：只处理输出，不动磁盘
+  const afterOutput: any = { output: "" }
+
+  // 模拟 opencode 的 grep 输出（可能包含乱码）
+  // 先读取文件，用 UTF-8 解码（模拟 opencode 的错误行为）
+  const buffer = await readFile(path)
+  const text = buffer.toString("utf-8")
+  const lines = text.split(/\r?\n/)
+  const regex = new RegExp(pattern)
+  const grepLines: string[] = []
+
+  for (let i = 0; i < lines.length; i++) {
+    if (regex.test(lines[i])) {
+      grepLines.push(`${path}:${i + 1}:${lines[i]}`)
+    }
+  }
+  afterOutput.output = grepLines.join("\n")
+
+  // 调用 after hook（不修改磁盘）
+  await hooks["tool.execute.after"]({ tool: "grep", args: { pattern, paths: [path] } }, afterOutput)
   return afterOutput
 }
 
@@ -261,18 +275,47 @@ async function test6_ApplyPatchKeepsEncoding(hooks: any) {
   await assertIsGBK(FILE_A, "apply_patch 后 A")
 }
 
-async function test7_GrepKeepsEncoding(hooks: any) {
-  console.log("\n[test 7] grep 工具：和 edit 一致，grep 前后保持 GBK 编码")
+async function test7_CRLFLineEndings(hooks: any) {
+  console.log("\n[test 7] CRLF 行尾：edit 应保持原始行尾风格")
+
+  // 创建带 CRLF 的 GBK 文件
+  const crlfContent = "// CRLF 测试\r\nint main() {\r\n    return 0;\r\n}\r\n"
+  const crlfBuffer = iconv.encode(crlfContent, "gbk")
+  await writeFile(FILE_A, crlfBuffer)
+
+  // 验证原始文件是 CRLF
+  const originalBytes = await readFile(FILE_A)
+  const originalText = originalBytes.toString("binary")
+  assert(originalText.includes("\r\n"), "原始文件是 CRLF 行尾")
+
+  // edit 文件
+  const newContent = "// CRLF 测试（已修改）\nint main() {\n    return 1;\n}\n"
+  await simulateEdit(hooks, FILE_A, newContent)
+
+  // 验证 edit 后仍是 GBK
+  await assertIsGBK(FILE_A, "edit 后文件")
+
+  // 验证行尾被恢复为 CRLF
+  const editedBytes = await readFile(FILE_A)
+  const editedText = iconv.decode(editedBytes, "gbk")
+  assert(editedText.includes("\r\n"), "edit 后保持 CRLF 行尾")
+  assert(editedText.includes("已修改"), "edit 内容正确")
+}
+
+async function test8_GrepKeepsEncoding(hooks: any) {
+  console.log("\n[test 7] grep 工具：和 read 一致，只处理输出，不动磁盘")
 
   // 准备 GBK 文件
   await writeFile(FILE_A, iconv.encode(contentA, "gbk"))
-  await simulateRead(hooks, FILE_A)  // 让 cache 有 A
 
-  // 模拟 grep
-  await simulateGrep(hooks, FILE_A, "search results")
+  // 搜索包含"文件"的行
+  const result = await simulateGrep(hooks, FILE_A, "文件")
 
-  // grep 前后，磁盘应该还是 GBK
+  // 磁盘应该还是 GBK（grep 不动磁盘）
   await assertIsGBK(FILE_A, "grep 后 A")
+
+  // 输出应该包含正确解码的中文
+  assert(result.output.includes("文件"), "grep 输出包含正确中文")
 }
 
 // ============== 5. 主流程 ==============
@@ -296,7 +339,8 @@ async function main() {
     await test4_EditOutputPreservesDiff(hooks)
     await test5_WriteToolKeepsEncoding(hooks)
     await test6_ApplyPatchKeepsEncoding(hooks)
-    await test7_GrepKeepsEncoding(hooks)
+    await test7_CRLFLineEndings(hooks)
+    await test8_GrepKeepsEncoding(hooks)
   } finally {
     await teardown()
   }
