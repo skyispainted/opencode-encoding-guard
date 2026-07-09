@@ -143,7 +143,10 @@ async function simulateApplyPatch(hooks: any, path: string) {
 }
 
 async function simulateGrep(hooks: any, path: string, output: string) {
-  // grep：不修改文件，只读取并搜索
+  // grep：和 edit 一样，before 转 UTF-8，after 转回
+  const beforeOutput: any = { args: { paths: [path] } }
+  await hooks["tool.execute.before"]({ tool: "grep" }, beforeOutput)
+  // 模拟 opencode grep（读取并搜索）
   const afterOutput: any = { output }
   await hooks["tool.execute.after"]({ tool: "grep", args: { paths: [path] } }, afterOutput)
   return afterOutput
@@ -258,20 +261,18 @@ async function test6_ApplyPatchKeepsEncoding(hooks: any) {
   await assertIsGBK(FILE_A, "apply_patch 后 A")
 }
 
-async function test7_GrepDetectsEncoding(hooks: any) {
-  console.log("\n[test 7] grep 工具：检测乱码并提示编码信息")
+async function test7_GrepKeepsEncoding(hooks: any) {
+  console.log("\n[test 7] grep 工具：和 edit 一致，grep 前后保持 GBK 编码")
 
   // 准备 GBK 文件
   await writeFile(FILE_A, iconv.encode(contentA, "gbk"))
-  await simulateRead(hooks, FILE_A)
+  await simulateRead(hooks, FILE_A)  // 让 cache 有 A
 
-  // 模拟 grep 返回包含乱码的输出（替换字符 ）
-  const garbledOutput = "file.cpp:10:  some garbled text"
-  const result = await simulateGrep(hooks, FILE_A, garbledOutput)
+  // 模拟 grep
+  await simulateGrep(hooks, FILE_A, "search results")
 
-  // 应该包含编码提示
-  assert(result.output.includes("[EG:grep]"), "grep 输出含 [EG:grep] 标记")
-  assert(result.output.includes("gbk"), "grep 提示包含编码名 gbk")
+  // grep 前后，磁盘应该还是 GBK
+  await assertIsGBK(FILE_A, "grep 后 A")
 }
 
 // ============== 5. 主流程 ==============
@@ -295,7 +296,7 @@ async function main() {
     await test4_EditOutputPreservesDiff(hooks)
     await test5_WriteToolKeepsEncoding(hooks)
     await test6_ApplyPatchKeepsEncoding(hooks)
-    await test7_GrepDetectsEncoding(hooks)
+    await test7_GrepKeepsEncoding(hooks)
   } finally {
     await teardown()
   }

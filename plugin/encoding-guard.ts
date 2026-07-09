@@ -256,6 +256,28 @@ export const EncodingGuard: Plugin = async (input) => {
             }
           }
         }
+
+        // grep 工具：和 edit 一样，before 转 UTF-8 让 grep 搜到正确内容
+        if (hookInput.tool === "grep") {
+          const paths = hookOutput?.args?.paths || hookOutput?.args?.path
+          if (paths) {
+            const pathList = Array.isArray(paths) ? paths : [paths]
+            for (const p of pathList) {
+              if (existsSync(p)) {
+                let encoding = convertCache.get(p)
+                if (!encoding) {
+                  await findRules(p)
+                  encoding = matchRule(p)
+                  if (encoding !== "utf8") convertCache.set(p, encoding)
+                }
+                if (encoding !== "utf8" && !utf8OnDisk.has(p)) {
+                  log(`before grep: converting ${p} ${encoding}->UTF-8`)
+                  await convertToUtf8OnDisk(p, encoding)
+                }
+              }
+            }
+          }
+        }
       } catch (e: any) {
         log(`before hook CRASH: ${e.message}`)
       }
@@ -311,6 +333,22 @@ export const EncodingGuard: Plugin = async (input) => {
           const prev = typeof output?.output === "string" ? output.output : ""
           output.output = prev ? `${prev}\n\n[EG:apply_patch] wrote ${path} as ${origEncoding}` : `[EG:apply_patch] wrote ${path} as ${origEncoding}`
         }
+
+        // grep 工具：和 edit 一样，after 转回原编码
+        if (hookInput.tool === "grep") {
+          const paths = hookInput.args?.paths || hookInput.args?.path
+          if (paths) {
+            const pathList = Array.isArray(paths) ? paths : [paths]
+            for (const p of pathList) {
+              if (existsSync(p) && convertCache.has(p)) {
+                const origEncoding = convertCache.get(p)!
+                await convertBack(p, origEncoding)
+                log(`after grep: converted ${p} back to ${origEncoding}`)
+              }
+            }
+          }
+        }
+
         if (hookInput.tool === "write") {
           // write 工具直接写整个文件。如果文件应该是 GBK 等非 UTF-8 编码：
           // 1) before 已尝试拦截 content；如果拦截成功，磁盘已是 GBK
@@ -332,31 +370,6 @@ export const EncodingGuard: Plugin = async (input) => {
               } catch {
                 // 不是合法 UTF-8 —— 说明 before 已经转过了，或者本来就是原编码
                 log(`after write: ${path} not UTF-8, leaving as-is`)
-              }
-            }
-          }
-        }
-
-        // grep 工具：读取文件内容搜索，输出需要转码
-        if (hookInput.tool === "grep") {
-          // grep 的 output.output 是字符串，包含搜索结果
-          // 需要检测是否有乱码（GBK 文件被当 UTF-8 读取）
-          if (typeof output?.output === "string" && output.output.includes("")) {
-            // 有替换字符，说明是编码问题
-            // 尝试从 cache 或规则中获取编码
-            const paths = hookInput.args?.paths || hookInput.args?.path
-            if (paths) {
-              const pathList = Array.isArray(paths) ? paths : [paths]
-              // 找第一个在 cache 里的文件
-              for (const p of pathList) {
-                const encoding = convertCache.get(p)
-                if (encoding && encoding !== "utf8") {
-                  // 重新执行搜索并转码
-                  // 这里简化处理：标记一下，让 LLM 知道有编码问题
-                  output.output = `[EG:grep] 结果可能包含乱码，文件编码为 ${encoding}。建议先用 read 工具读取文件确认内容。\n\n${output.output}`
-                  log(`after grep: detected encoding issue for ${p}, encoding=${encoding}`)
-                  break
-                }
               }
             }
           }
