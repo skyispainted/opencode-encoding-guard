@@ -198,6 +198,13 @@ export const EncodingGuard: Plugin = async (input) => {
       try {
         log(`before: tool=${hookInput.tool}, sessionID=${hookInput.sessionID}, callID=${hookInput.callID}`)
 
+        // 诊断：dump 所有工具的 args 结构
+        const args = hookOutput?.args ?? hookInput?.args
+        if (args && (hookInput.tool === "write" || hookInput.tool === "edit" || hookInput.tool === "read")) {
+          const argKeys = Object.keys(args)
+          log(`before ${hookInput.tool}: argKeys=${JSON.stringify(argKeys)}`)
+        }
+
         if (hookInput.tool === "edit") {
           // opencode 的 before hook：args 在第二个参数里
           const path = hookOutput?.args?.filePath
@@ -214,6 +221,29 @@ export const EncodingGuard: Plugin = async (input) => {
             }
           } else {
             log(`before edit: no path (path=${path})`)
+          }
+        }
+
+        // write 工具：直接写整个文件，需要拦截
+        if (hookInput.tool === "write") {
+          const path = hookOutput?.args?.filePath ?? hookOutput?.args?.path
+          if (path) {
+            let encoding = convertCache.get(path)
+            if (!encoding) {
+              await findRules(path)
+              encoding = matchRule(path)
+              if (encoding !== "utf8") convertCache.set(path, encoding)
+            }
+            log(`before write: path=${path}, encoding=${encoding}`)
+            if (encoding !== "utf8" && hookOutput?.args?.content) {
+              // LLM 给的是 UTF-8 字符串，转成 GBK 再让 write 写
+              const utf8Content = hookOutput.args.content
+              const gbkBuffer = iconv.encode(utf8Content, encoding)
+              // write 工具的 content 字段可能是 string，需要替换为 Buffer 或 base64
+              // 先尝试直接替换为 Buffer，看 opencode 是否接受
+              hookOutput.args.content = gbkBuffer
+              log(`before write: replaced content with ${gbkBuffer.length} bytes of ${encoding}`)
+            }
           }
         }
       } catch (e: any) {
@@ -255,6 +285,31 @@ export const EncodingGuard: Plugin = async (input) => {
           await convertBack(path, origEncoding)
           const prev = typeof output?.output === "string" ? output.output : ""
           output.output = prev ? `${prev}\n\n[EG:edit] wrote ${path} as ${origEncoding}` : `[EG:edit] wrote ${path} as ${origEncoding}`
+        }
+        if (hookInput.tool === "write") {
+          // write 工具直接写整个文件。如果文件应该是 GBK 等非 UTF-8 编码：
+          // 1) before 已尝试拦截 content；如果拦截成功，磁盘已是 GBK
+          // 2) 如果拦截失败（opencode 不接受 Buffer 等），磁盘是 UTF-8，这里再转一次
+          const path = hookInput.args?.filePath ?? hookInput.args?.path
+          if (path && existsSync(path)) {
+            const encoding = convertCache.get(path)
+            if (encoding && encoding !== "utf8") {
+              // 检查磁盘是不是 UTF-8（如果是就转回）
+              const buf = readFileSync(path)
+              const asUtf8 = new TextDecoder("utf-8", { fatal: true })
+              try {
+                asUtf8.decode(buf)
+                // 是合法 UTF-8 —— 说明 write 写了 UTF-8，我们得转回原编码
+                const text = buf.toString("utf-8")
+                const encoded = iconv.encode(text, encoding)
+                writeFileSync(path, encoded)
+                log(`after write: re-encoded ${path} UTF-8->${encoding}`)
+              } catch {
+                // 不是合法 UTF-8 —— 说明 before 已经转过了，或者本来就是原编码
+                log(`after write: ${path} not UTF-8, leaving as-is`)
+              }
+            }
+          }
         }
       } catch (e: any) {
         log(`after hook CRASH: ${e.message}`)

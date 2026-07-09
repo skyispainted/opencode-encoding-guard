@@ -114,6 +114,24 @@ async function simulateEdit(hooks: any, path: string, newContent: string) {
   return afterOutput
 }
 
+async function simulateWrite(hooks: any, path: string, newContent: string) {
+  // write 工具：LLM 给 UTF-8 字符串，直接写整个文件
+  // before hook：args 在第二个参数里，content 字段是要写的内容
+  const beforeOutput: any = { args: { filePath: path, content: newContent } }
+  await hooks["tool.execute.before"]({ tool: "write" }, beforeOutput)
+  // 模拟 opencode write：写入 content（可能被 before hook 改过）
+  const contentToWrite = beforeOutput.args.content
+  if (Buffer.isBuffer(contentToWrite)) {
+    await writeFile(path, contentToWrite)
+  } else {
+    await writeFile(path, Buffer.from(contentToWrite, "utf-8"))
+  }
+  // after hook：args 在第一个参数里
+  const afterOutput: any = { output: "<write ok>" }
+  await hooks["tool.execute.after"]({ tool: "write", args: { filePath: path } }, afterOutput)
+  return afterOutput
+}
+
 // ============== 4. 测试用例 ==============
 
 async function test1_ReadDoesNotMutateDisk(hooks: any) {
@@ -185,6 +203,30 @@ async function test4_EditOutputPreservesDiff(hooks: any) {
   assert(output.output.includes("gbk"), "EG 标记含原编码名")
 }
 
+async function test5_WriteToolKeepsEncoding(hooks: any) {
+  console.log("\n[test 5] write 工具：LLM 给 UTF-8，插件应转成 GBK 落盘")
+  console.log("         （旧 bug：插件不 hook write，UTF-8 直接落盘 → 文件变 UTF-8）")
+
+  // 先 read，让 cache 有 A
+  await writeFile(FILE_A, iconv.encode(contentA, "gbk"))
+  await simulateRead(hooks, FILE_A)
+
+  // LLM 用 write 重写整个文件，给的是 UTF-8 字符串
+  const newContent = "// 文件 A（被 write 重写）\n"
+    + "#include <stdio.h>\n"
+    + "int main() {\n"
+    + '    printf("write 工具写入的中文\\n");\n'
+    + "    return 0;\n"
+    + "}\n"
+  await simulateWrite(hooks, FILE_A, newContent)
+
+  // 磁盘应该还是 GBK
+  await assertIsGBK(FILE_A, "write 后 A")
+  const bytes = await readFile(FILE_A)
+  const text = iconv.decode(bytes, "gbk")
+  assert(text.includes("write 工具写入的中文"), "write 后内容正确")
+}
+
 // ============== 5. 主流程 ==============
 
 async function main() {
@@ -204,6 +246,7 @@ async function main() {
 
     await test3_EditWithoutPriorRead(hooks)
     await test4_EditOutputPreservesDiff(hooks)
+    await test5_WriteToolKeepsEncoding(hooks)
   } finally {
     await teardown()
   }
